@@ -531,7 +531,7 @@ send_message(Host, Port,Message,Ack) :-                                 %% Send 
         exception(_),                                                   %% Exception value is unused
         tcp_close_socket(Socket)),                                      %% Close Socket
         setup_call_cleanup(tcp_open_socket(Socket, In, Out),
-        chat_to_server_Tartarus_IITG(In, Out,Message,Ack),              %% call predicate to send message//command
+        chat_to_server_Tartarus_IITG(In,Out,Message,Ack),              %% call predicate to send message//command
         close_connection_Tartarus_IITG(In, Out)),                       %% after sending message close In Out stream
         mutex_unlock(send_message_mutex).                               %% release mutex to be used by other functions
 
@@ -545,14 +545,17 @@ close_connection_Tartarus_IITG(In, Out) :-                              %% close
 
 %-------------------------------------------------
 
-chat_to_server_Tartarus_IITG(In, Out,Message,Ack) :-                    %% send messages to server with in out stream +In +Out +Message -Ack
+chat_to_server_Tartarus_IITG(In,Out,Message,Ack) :-                    %% send messages to server with in out stream +In +Out +Message -Ack
         Term = Message,                                                 %% Assign +Message to term variable
         (Term = end_of_file                                             %% If term = end_of_file then return
                 -> true
         ;
                 format(Out,'~q.~n',[Term]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
+                format('Term:~q.~n',[Term]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
+                format('Out:~q.~n',[Out]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
                 flush_output(Out),
                 read(In,Reply),                                         %% wait to get the reply from other side i.e command_acknowledge_Tartarus_IITG(_) as message
+                format('Reply:~q.~n',[Reply]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
                 (call(Reply)                                            %% call command_acknowledge_Tartarus_IITG(_) predicate
                         ->Ack = true;                                   %% if ack if valid the Ack is true else fail is returned
                         Ack = fail
@@ -1266,14 +1269,15 @@ agent_move(GUID,(Ip_other_end,Port_other_end)):-
         %((atom(GUID),integer(Port_other_end))->nothing;abort),
         
         assimilate_code(GUID,AgentCode),
-        compound_string(AgentCode,StrAgentCode),
-        encrypt_list(StrAgentCode,EncryptedAgentCode),
-        writeln(StrAgentCode), writeln(EncryptedAgentCode),
         agent_payload(GUID,PayloadList),
         agent_GUID(GUID,Handler,(Ip1,Port)),
         agent_token(GUID,ListOfTokens),
         list_to_set(ListOfTokens,ListOfTokens2),
         get_time(TT),
+        compound_string(AgentCode,StrAgentCode),
+        get_encrypt_key(Ip_other_end,Port_other_end,Key),
+        encrypt_list(StrAgentCode,EncryptedAgentCode),
+        writeln(Key), writeln(StrAgentCode), writeln(EncryptedAgentCode),
         assertz(outgoing_agent(GUID,TT,_)),
         (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send(GUID,Handler,PayloadList,EncryptedAgentCode,ListOfTokens2,TT)])->
                 (thread_peek_message(clean_agent_queue,agent_guid(GUID))->thread_get_message(clean_agent_queue,agent_guid(GUID));true),
@@ -1856,8 +1860,56 @@ handler(platform,(Ip_sender,Port_sender),send(GUID,Handler,PayloadList,Encrypted
         %nl,
         true,!.
 
-handler( platform, (_Ip_sender,_Port_sender), send(_GUID,_Handler,_PayloadList,[_Code|_CodeList],_ListOfTokens,_Bcktime)):-
+handler(platform,(_Ip_sender,_Port_sender), send(_GUID,_Handler,_PayloadList,[_Code|_CodeList],_ListOfTokens,_Bcktime)):-
                 print_message(error,'Error in handler. The posted agent not received properly over the Link').
+
+
+%---My handlers
+
+
+handler(platform,(Ip_sender,Port_sender),get_key):-
+        ttyflush,
+        writeln("send key"),
+        mutex_lock(send_message_mutex),
+        platform_token(PToken),
+        writeln(PToken),
+        catch(
+                (tcp_socket(Socket),
+                tcp_connect(Socket, Ip_sender:Port_sender),
+                tcp_open_socket(Socket, In, Out),
+                format(Out,'~d',[PToken]),
+                tcp_close_socket(Socket)
+                % close(In), close(Out)
+                ),
+                Error,
+        tcp_close(Socket)
+        ),
+        mutex_unlock(send_message_mutex).
+
+get_encrypt_key(Ip_receiver,Port_receiver,Key):-
+        ttyflush,
+        writeln("get key"),
+        mutex_lock(send_message_mutex),
+        catch(
+                (tcp_socket(Socket),
+                tcp_connect(Socket, Ip_receiver:Port_receiver),
+                tcp_open_socket(Socket, In, Out),
+                format(Out,'~s.~n',"[handler,platform,(localhost,6001),get_key]"),
+                writeln(Socket),writeln(Out),
+                flush_output(Out),
+                read(In,Key),
+                tcp_close_socket(Socket)
+                % close(In), close(Out)
+                ),
+                Error,
+                (print_message(error, Error),
+                fail)
+        ),
+        mutex_unlock(send_message_mutex).
+
+
+%---End of my handlers
+
 
 %------------------------server module-------------------------------
 
