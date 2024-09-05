@@ -34,6 +34,7 @@ Copyright (C) 2017  Robotics Lab., Dept. of Computer Science and Engg., Indian I
 
 :- use_module(library(socket)).                                 %% using TCP/IP connection
 :- use_module(library(crypto)).
+:- use_module(library(clpfd)).
 
 % store the socket id of platform
 :-dynamic platform_socket_Tartarus_IITG/1.
@@ -109,17 +110,17 @@ overall_hop_time_stat(0,0,0).
 
 %---My Definitions
 
-encrypt(X, Xenc) :- crypto_data_encrypt(X, 'chacha20-poly1305', '1111', '1111', Xenc, []).
-encrypt_list([], []).
-encrypt_list([H|T], [Henc|Tenc]) :-
-        encrypt(H, Henc),
-        encrypt_list(T, Tenc).
+encrypt(Data, point(Kx,Ky), EncryptedData, Tag):-
+        number_string(Kx,Key1),
+        writeln(Kx), writeln(Key1),
+        number_string(Ky,Key2),
+        writeln(Ky), writeln(Key2),
+        crypto_data_encrypt(Data, 'chacha20-poly1305', Key1, Key2, EncryptedData, [tag(Tag)]).
 
-decrypt(X, Xdec) :- crypto_data_decrypt(X, 'chacha20-poly1305', '1111', '1111', Xdec, []).
-decrypt_list([], []).
-decrypt_list([H|T], [Hdec|Tdec]) :-
-        decrypt(H, Hdec),
-        decrypt_list(T, Tdec).
+decrypt(Data, point(Kx,Ky), DecryptedData, Tag):-
+        number_string(Kx,Key1),
+        number_string(Ky,Key2),
+        crypto_data_decrypt(Data, 'chacha20-poly1305', Key1, Key2, DecryptedData, [tag(Tag)]).
 
 print_list([]).
 print_list([H|T]) :- writeln(H), print_list(T).
@@ -140,12 +141,13 @@ print_type(X) :-
 ;   writeln('Unknown type')
 ).
 
-compound_string([], []).
-compound_string([Hc|Tc], [Hs|Ts]) :-
-        term_string(Hc, Hs),
-        compound_string(Tc, Ts).
-
-
+bytes_integer(Bs, N) :-
+        foldl(pow, Bs, 0-0, N-_).
+        
+pow(B, N0-I0, N-I) :-
+        B in 0..255,
+        N #= N0 + B*256^I0,
+        I #= I0 + 1.
 
 %---End of my definitions
 
@@ -235,6 +237,9 @@ setup_Tartarus_IITG:-
         (dynamic (database/1)),
         (dynamic (platform_port/1)),
         (dynamic (platform_Ip/1)),
+        (dynamic (platform_public_key/1)),
+        (dynamic (platform_private_key/1)),
+        (dynamic (public_key_list/3)),
         (dynamic (execs/1)),
         (dynamic (agent_GUID/3)),
         (dynamic (agent_payload/2)),
@@ -524,7 +529,7 @@ agent_post(_Platform,(_Ip_receiver,_Port_receiver),_FunctionList):-
 
 % Independent predicate to send message without Sender agent name or port etc
 
-send_message(Host, Port,Message,Ack) :-                                 %% Send Message to +Host/IP +Port +Message -Ack
+send_message(Host,Port,Message,Ack) :-                                 %% Send Message to +Host/IP +Port +Message -Ack
         mutex_lock(send_message_mutex),                                 %% Hold the lock while sending message
         setup_call_catcher_cleanup(tcp_socket(Socket),                  %% Get free -socket to send//recieve
         tcp_connect(Socket, Host:Port),                                 %% Bind the socket to +Ip and +Port
@@ -1274,12 +1279,8 @@ agent_move(GUID,(Ip_other_end,Port_other_end)):-
         agent_token(GUID,ListOfTokens),
         list_to_set(ListOfTokens,ListOfTokens2),
         get_time(TT),
-        compound_string(AgentCode,StrAgentCode),
-        get_encrypt_key(Ip_other_end,Port_other_end,Key),
-        encrypt_list(StrAgentCode,EncryptedAgentCode),
-        writeln(Key), writeln(StrAgentCode), writeln(EncryptedAgentCode),
         assertz(outgoing_agent(GUID,TT,_)),
-        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send(GUID,Handler,PayloadList,EncryptedAgentCode,ListOfTokens2,TT)])->
+        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send(GUID,Handler,PayloadList,AgentCode,ListOfTokens2,TT)])->
                 (thread_peek_message(clean_agent_queue,agent_guid(GUID))->thread_get_message(clean_agent_queue,agent_guid(GUID));true),
                 thread_send_message(clean_agent_queue,agent_guid(GUID)),
                 thread_send_message(clean_platform,agent_guid(GUID))
@@ -1289,6 +1290,100 @@ agent_move(GUID,(Ip_other_end,Port_other_end)):-
                 retractall(outgoing_agent(GUID,_,_))),!.
         %agent_post(platform,(Ip,Port),[handler,platform,(Ip,Port),clean_agent(GUID)]).
 
+generate_platform_keys():-
+        retractall(platform_public_key(_)),
+        retractall(platform_private_key(_)),
+        crypto_n_random_bytes(25, Keybytes),
+        bytes_integer(Keybytes, Privkey),
+        crypto_name_curve(prime256v1, Curve),
+        crypto_curve_generator(Curve, Generator),
+        crypto_curve_scalar_mult(Curve, Privkey, Generator, Pubkey),
+        asserta(platform_public_key(Pubkey)),
+        asserta(platform_private_key(Privkey)).
+
+generate_session_keys(PubSessionkey, PrivSesskey):-
+        crypto_n_random_bytes(25, Keybytes),
+        bytes_integer(Keybytes, PrivSesskey),
+        crypto_name_curve(prime256v1, Curve),
+        crypto_curve_generator(Curve, Generator),
+        crypto_curve_scalar_mult(Curve, PrivSesskey, Generator, PubSessionkey).
+
+generate_secret_key(Pubkey, Privkey, Secretkey):-
+        crypto_name_curve(prime256v1, Curve),
+        crypto_curve_scalar_mult(Curve, Privkey, Pubkey, Secretkey).
+
+get_public_key(Ip_other_end,Port_other_end):-
+        platform_Ip(Ip1),
+        get_ip(Ip),
+        platform_port(Port),
+                
+        retractall(get_destination_Ip(_)), assert(get_destination_Ip(Ip_other_end)),
+        retractall(get_destination_port(_)), assert(get_destination_port(Port_other_end)),
+        
+        ((Ip = Ip_other_end,Port = Port_other_end)->writeln('Same platform.'),abort;true),
+        ((Ip1 = Ip_other_end,Port = Port_other_end)->writeln('Same platform.'),abort;true),
+        ((Ip_other_end=localhost,Port = Port_other_end)->writeln('Same platform.'),abort;true),
+        
+        agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),req_public_key]).
+
+
+
+agent_move_secure(GUID,(Ip_other_end,Port_other_end)):-
+        platform_Ip(Ip1),
+        get_ip(Ip),
+        platform_port(Port),
+                
+        retractall(get_destination_Ip(_)), assert(get_destination_Ip(Ip_other_end)),
+        retractall(get_destination_port(_)), assert(get_destination_port(Port_other_end)),
+        
+        ((Ip = Ip_other_end,Port = Port_other_end)->writeln('Agent is already on same platform.'),abort;true),
+        ((Ip1 = Ip_other_end,Port = Port_other_end)->writeln('Agent is already on same platform.'),abort;true),
+        ((Ip_other_end=localhost,Port = Port_other_end)->writeln('Agent is already on same platform.'),abort;true),
+                        
+        assimilate_code(GUID,AgentCode),
+        agent_payload(GUID,PayloadList),
+        agent_GUID(GUID,Handler,(Ip1,Port)),
+        agent_token(GUID,ListOfTokens),
+        list_to_set(ListOfTokens,ListOfTokens2),
+        get_time(TT),
+
+        (public_key_list(Ip_other_end,Port_other_end,Pubkey)->
+        nothing;
+        writeln("Get the public key of the platform")),
+        generate_session_keys(PubSesskey,PrivSesskey),
+        generate_secret_key(Pubkey,PrivSesskey,Secretkey),
+        writeln(Secretkey),
+
+        term_string(AgentCode, StrAgentCode),
+        term_string(PayloadList, StrPayloadList),
+        term_string(ListOfTokens2, StrListOfTokens2),
+        term_string(GUID, StrGUID),
+        term_string(Handler, StrHandler),
+
+        encrypt(StrGUID, Secretkey, EncGUID, Tag1),
+        encrypt(StrHandler, Secretkey, EncHandler, Tag2),
+        encrypt(StrAgentCode, Secretkey, EncAgentCode, Tag3),
+        encrypt(StrPayloadList, Secretkey, EncPayloadList, Tag4),
+        encrypt(StrListOfTokens2, Secretkey, EncListOfTokens2, Tag5),
+        
+        decrypt(EncGUID, Secretkey, DecGUID, Tag1),
+        writeln(DecGUID),
+        decrypt(EncAgentCode, Secretkey, DecAgentCode, Tag3),
+        writeln(DecAgentCode),
+        decrypt(EncPayloadList, Secretkey, DecPayloadList, Tag4),
+        writeln(DecPayloadList),
+        
+        assertz(outgoing_agent(GUID,TT,_)),
+        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send_secure(EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2,Secretkey,Tag1,Tag2,Tag3,Tag4,Tag5,TT)])->
+                (thread_peek_message(clean_agent_queue,agent_guid(GUID))->thread_get_message(clean_agent_queue,agent_guid(GUID));true),
+                thread_send_message(clean_agent_queue,agent_guid(GUID)),
+                thread_send_message(clean_platform,agent_guid(GUID))
+                %Functor=.. [handler,platform,(Ip,Port),clean_agent(GUID)],
+                %catch(thread_create(call(Functor),_,[detached(true)]),Error,writeln(Error))
+                ;
+                retractall(outgoing_agent(GUID,_,_))),!.
+        %agent_post(platform,(Ip,Port),[handler,platform,(Ip,Port),clean_agent(GUID)]).
+        
 
 agent_move(GUID,(_Ip,_Port)):- print_message(error,'Move agent Failed for ':GUID),nl.
                                %print_message(error,'Please enter a valid destination token for the moving agent.'),nl.
@@ -1819,10 +1914,6 @@ handler(platform,(_Ip,_Port),send_nackm(_GUID,_Handler,_PayloadList,_ListOfToken
 handler(platform,(Ip_sender,Port_sender),send(GUID,Handler,PayloadList,EncryptedCodeList,ListOfTokens,_BackTime)):-                            %//
         ttyflush,
         %write('Receiving an Agent Posted by link'),writeln(Ip_sender),writeln(Port_sender),writeln(BackTime),nl,
-        writeln(PayloadList), writeln(EncryptedCodeList), writeln(ListOfTokens),
-        decrypt_list(EncryptedAgentCode,CodeListString),
-        compound_string(CodeListString,CodeList),
-        writeln(CodeList),
         (platform_token(_)->
                 nothing;
                 agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail
@@ -1866,25 +1957,89 @@ handler(platform,(_Ip_sender,_Port_sender), send(_GUID,_Handler,_PayloadList,[_C
 
 %---My handlers
 
-
-handler(platform,(Ip_sender,Port_sender),get_key):-
+handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens,Secretkey,Tag1,Tag2,Tag3,Tag4,Tag5,_BackTime)):-                            %//
         ttyflush,
-        writeln("send key"),
-        mutex_lock(send_message_mutex),
-        platform_token(PToken),
-        writeln(PToken),
-        catch(
-                (tcp_socket(Socket),
-                tcp_connect(Socket, Ip_sender:Port_sender),
-                tcp_open_socket(Socket, In, Out),
-                format(Out,'~d',[PToken]),
-                tcp_close_socket(Socket)
-                % close(In), close(Out)
-                ),
-                Error,
-        tcp_close(Socket)
+        %write('Receiving an Agent Posted by link'),writeln(Ip_sender),writeln(Port_sender),writeln(BackTime),nl,
+        % writeln(PubSesskey),
+        % platform_private_key(Privkey),
+        % generate_secret_key(PubSesskey,Privkey,Secretkey),
+        writeln(Secretkey),
+        decrypt(EncGUID, Secretkey, StrGUID, Tag1),
+        decrypt(EncHandler, Secretkey, StrHandler, Tag2),
+        decrypt(EncCodeList, Secretkey, StrCodeList, Tag3),
+        decrypt(EncPayloadList, Secretkey, StrPayloadList, Tag4),
+        decrypt(EncListOfTokens, Secretkey, StrListOfTokens, Tag5),
+        
+        term_string(CodeList, StrCodeList),
+        writeln(AgentCode),
+        term_string(PayloadList, StrPayloadList),
+        writeln(PayloadList),
+        term_string(ListOfTokens, StrListOfTokens),
+        writeln(ListOfTokens),
+        term_string(GUID, StrGUID),
+        writeln(GUID),
+        term_string(Handler, StrHandler),
+        writeln(Handler),
+
+        (platform_token(_)->
+                nothing;
+                agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail
         ),
-        mutex_unlock(send_message_mutex).
+        (platform_token(PToken)->
+                (member(PToken,ListOfTokens)->
+                        nothing;
+                        (agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail)
+                );
+                nothing
+        ),
+        (agent_GUID(GUID,Handler,(_,_))->   % Tushar - added to kill agent already present with same name and handler name
+                writeln(' '),
+                agent_kill(GUID)
+                ;
+                nothing
+        ),
+        write(' '),        
+        write(' '),nl,
+        get_platform_details(Platform_Ip,Platform_Port),
+        (thread_peek_message(clean_agent_queue,agent_guid(GUID))->
+                cleanup_wait(GUID)
+                %handler(platform,(Platform_Ip,Platform_Port),clean_agent(GUID))
+                ;true
+        ),
+        % assert(agent_payload(GUID,PayloadList)),
+        assert(agent_token(GUID,ListOfTokens)),
+        assert_code_Tartarus_IITG(CodeList),
+        assert(agent_GUID(GUID,Handler,(Platform_Ip,Platform_Port))),
+        get_time(Time),
+        agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_ackm(GUID,Time)]),
+        agent_execute(GUID,(Platform_Ip, Platform_Port),Handler),
+        %nl,write('Agent has been created at this port : '),
+        %write(Port2),nl,
+        %nl,
+        true,!.
+
+handler(platform,(_Ip_sender,_Port_sender), send_secure(_GUID,_Handler,_PayloadList,[_Code|_CodeList],_ListOfTokens,_PubSesskey,_Bcktime)):-
+        print_message(error,'Error in handler. The posted agent not received properly over the Link').
+
+
+
+handler(platform,(Ip_sender,Port_sender),req_public_key):-
+        ttyflush,
+        writeln("send public key"),
+        (platform_public_key(Pubkey)->
+                nothing;
+                agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail
+        ),
+        get_platform_details(Platform_Ip,Platform_Port),
+        agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Platform_Ip,Platform_Port),res_public_key(Pubkey)]),
+        writeln("pubkey sent").
+
+handler(platform,(Ip_sender,Port_sender),res_public_key(Pubkey)):-
+        ttyflush,
+        writeln(Pubkey),
+        retractall(public_key_list(Ip_sender,Port_sender,_)),
+        asserta(public_key_list(Ip_sender,Port_sender,Pubkey)),
+        writeln("pubkey stored").
 
 get_encrypt_key(Ip_receiver,Port_receiver,Key):-
         ttyflush,
