@@ -132,25 +132,6 @@ decrypt_list([H|T], Key, [Hdec|Tdec]):-
         term_string(Hdec, Hstr),
         decrypt_list(T, Key, Tdec).
 
-print_list([]).
-print_list([H|T]) :- writeln(H), print_list(T).
-
-print_type(X) :-
-(   atom(X)
-->  writeln('Atom')
-;   integer(X)
-->  writeln('Integer')
-;   float(X)
-->  writeln('Float')
-;   string(X)
-->  writeln('String')
-;   is_list(X)
-->  writeln('List')
-;   compound(X)
-->  writeln('Compound Term')
-;   writeln('Unknown type')
-).
-
 bytes_integer(Bs, N) :-
         foldl(pow, Bs, 0-0, N-_).
         
@@ -249,7 +230,7 @@ setup_Tartarus_IITG:-
         (dynamic (platform_Ip/1)),
         (dynamic (platform_public_key/1)),
         (dynamic (platform_private_key/1)),
-        (dynamic (public_key_list/3)),
+        (dynamic (public_key_list/2)),
         (dynamic (execs/1)),
         (dynamic (agent_GUID/3)),
         (dynamic (agent_payload/2)),
@@ -1299,27 +1280,30 @@ agent_move(GUID,(Ip_other_end,Port_other_end)):-
                 retractall(outgoing_agent(GUID,_,_))),!.
         %agent_post(platform,(Ip,Port),[handler,platform,(Ip,Port),clean_agent(GUID)]).
 
-generate_platform_keys():-
+generate_platform_keys:-
         retractall(platform_public_key(_)),
         retractall(platform_private_key(_)),
         crypto_n_random_bytes(10, Keybytes),
-        bytes_integer(Keybytes, Privkey),
+        bytes_integer(Keybytes, PrivKey),
         crypto_name_curve(prime256v1, Curve),
         crypto_curve_generator(Curve, Generator),
-        crypto_curve_scalar_mult(Curve, Privkey, Generator, Pubkey),
-        asserta(platform_public_key(Pubkey)),
-        asserta(platform_private_key(Privkey)).
+        crypto_curve_scalar_mult(Curve, PrivKey, Generator, PubKey),
+        asserta(platform_public_key(PubKey)),
+        asserta(platform_private_key(PrivKey)).
 
-generate_session_keys(PubSesskey, PrivSesskey):-
+refresh_platform_keys:-
+        generate_platform_keys.
+
+generate_session_keys(PubSessKey, PrivSessKey):-
         crypto_n_random_bytes(10, Keybytes),
-        bytes_integer(Keybytes, PrivSesskey),
+        bytes_integer(Keybytes, PrivSessKey),
         crypto_name_curve(prime256v1, Curve),
         crypto_curve_generator(Curve, Generator),
-        crypto_curve_scalar_mult(Curve, PrivSesskey, Generator, PubSesskey).
+        crypto_curve_scalar_mult(Curve, PrivSessKey, Generator, PubSessKey).
 
-generate_secret_key(Pubkey, Privkey, Secretkey):-
+generate_secret_key(PubKey, PrivKey, Secretkey):-
         crypto_name_curve(prime256v1, Curve),
-        crypto_curve_scalar_mult(Curve, Privkey, Pubkey, Secretkey).
+        crypto_curve_scalar_mult(Curve, PrivKey, PubKey, Secretkey).
 
 get_public_key(Ip_other_end,Port_other_end):-
         platform_Ip(Ip1),
@@ -1335,6 +1319,11 @@ get_public_key(Ip_other_end,Port_other_end):-
         
         agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),req_public_key]).
 
+remove_public_key(Ip,Port):-
+        retractall(public_key_list((Ip,Port),_)).
+
+clear_public_keys:-
+        retractall(public_key_list(_,_)).
 
 agent_move_secure(GUID,(Ip_other_end,Port_other_end)):-
         platform_Ip(Ip1),
@@ -1355,18 +1344,18 @@ agent_move_secure(GUID,(Ip_other_end,Port_other_end)):-
         list_to_set(ListOfTokens,ListOfTokens2),
         get_time(TT),
 
-        (public_key_list(Ip_other_end,Port_other_end,Pubkey)->
-        nothing;
-        writeln("Get the public key of the platform")),
-        generate_session_keys(PubSesskey,PrivSesskey),
-        generate_secret_key(Pubkey,PrivSesskey,Secretkey),
+        (public_key_list((Ip_other_end,Port_other_end), PubKey)->
+                nothing;
+                writeln('Get the public key of the platform'),fail,!),
+        generate_session_keys(PubSessKey,PrivSessKey),
+        generate_secret_key(PubKey,PrivSessKey,Secretkey),
 
         encrypt_list([GUID,Handler,PayloadList,AgentCode,ListOfTokens2],
                 Secretkey,
                 [EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2]),
 
         assertz(outgoing_agent(GUID,TT,_)),
-        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send_secure(EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2,PubSesskey,TT)])->
+        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send_secure(EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2,PubKey,PubSessKey,TT)])->
                 (thread_peek_message(clean_agent_queue,agent_guid(GUID))->thread_get_message(clean_agent_queue,agent_guid(GUID));true),
                 thread_send_message(clean_agent_queue,agent_guid(GUID)),
                 thread_send_message(clean_platform,agent_guid(GUID))
@@ -1863,7 +1852,9 @@ handler(platform,(_Ip,_Port),send_ackm(_GUID,_X)):- print_message(error,'handler
 handler(platform,(Ip,Port),send_nackm(GUID)):-
         ttyflush,
         writeln('--------negative ACK received-----------'),
-        outgoing_agent(GUID,_TT,_),
+        (outgoing_agent(GUID,_TT,_)->
+                writeln('--------negative ack processed-----------'),
+                ttyflush,!),
         %get_platform_details(Platform_Ip,Platform_Port),
         (thread_peek_message(clean_agent_queue,agent_guid(GUID))->
                         cleanup_wait(GUID)
@@ -1949,11 +1940,15 @@ handler(platform,(_Ip_sender,_Port_sender), send(_GUID,_Handler,_PayloadList,[_C
 
 %---My handlers
 
-handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens,PubSesskey,_BackTime)):-                            %//
+handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens,PubKeyOld,PubSessKey,_BackTime)):-                            %//
         ttyflush,
         %write('Receiving an Agent Posted by link'),writeln(Ip_sender),writeln(Port_sender),writeln(BackTime),nl,
-        platform_private_key(Privkey),
-        generate_secret_key(PubSesskey,Privkey,Secretkey),
+        (platform_public_key(PubKeyOld)->
+                nothing;
+                agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail
+        ),
+        platform_private_key(PrivKey),
+        generate_secret_key(PubSessKey,PrivKey,Secretkey),
         
         decrypt_list([EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens],
                 Secretkey,
@@ -1996,25 +1991,23 @@ handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPaylo
         %nl,
         true,!.
 
-handler(platform,(_Ip_sender,_Port_sender), send_secure(_GUID,_Handler,_PayloadList,_CodeList,_ListOfTokens,_PubSesskey,_Bcktime)):-
+handler(platform,(_Ip_sender,_Port_sender), send_secure(_GUID,_Handler,_PayloadList,_CodeList,_ListOfTokens,_PubKey,_PubSessKey,_Bcktime)):-
         print_message(error,'Error in handler. The posted agent not received properly over the Link').
-
-
 
 handler(platform,(Ip_sender,Port_sender),req_public_key):-
         ttyflush,
-        (platform_public_key(Pubkey)->
+        (platform_public_key(PubKey)->
                 nothing;
-                agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail
+                agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(_GUID)]),true,!
         ),
         get_platform_details(Platform_Ip,Platform_Port),
-        agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Platform_Ip,Platform_Port),res_public_key(Pubkey)]),
+        agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Platform_Ip,Platform_Port),res_public_key(PubKey)]),
         true,!.
 
-handler(platform,(Ip_sender,Port_sender),res_public_key(Pubkey)):-
+handler(platform,(Ip_sender,Port_sender),res_public_key(PubKey)):-
         ttyflush,
-        retractall(public_key_list(Ip_sender,Port_sender,_)),
-        asserta(public_key_list(Ip_sender,Port_sender,Pubkey)),
+        retractall(public_key_list((Ip_sender,Port_sender),_)),
+        asserta(public_key_list((Ip_sender,Port_sender),PubKey)),
         true,!.
 
 %---End of my handlers
