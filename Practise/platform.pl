@@ -110,17 +110,27 @@ overall_hop_time_stat(0,0,0).
 
 %---My Definitions
 
-encrypt(Data, point(Kx,Ky), EncryptedData, Tag):-
+encrypt(Data, point(Kx,Ky), EncryptedData):-
         number_string(Kx,Key1),
-        writeln(Kx), writeln(Key1),
         number_string(Ky,Key2),
-        writeln(Ky), writeln(Key2),
-        crypto_data_encrypt(Data, 'chacha20-poly1305', Key1, Key2, EncryptedData, [tag(Tag)]).
+        crypto_data_encrypt(Data, 'chacha20-poly1305', Key1, Key2, EncryptedData, []).
 
-decrypt(Data, point(Kx,Ky), DecryptedData, Tag):-
+decrypt(Data, point(Kx,Ky), DecryptedData):-
         number_string(Kx,Key1),
         number_string(Ky,Key2),
-        crypto_data_decrypt(Data, 'chacha20-poly1305', Key1, Key2, DecryptedData, [tag(Tag)]).
+        crypto_data_decrypt(Data, 'chacha20-poly1305', Key1, Key2, DecryptedData, []).
+
+encrypt_list([], _Key, []).
+encrypt_list([H|T], Key, [Henc|Tenc]):-
+        term_string(H, Hstr),
+        encrypt(Hstr, Key, Henc),
+        encrypt_list(T, Key, Tenc).
+
+decrypt_list([], _Key, []).
+decrypt_list([H|T], Key, [Hdec|Tdec]):-
+        decrypt(H, Key, Hstr),
+        term_string(Hdec, Hstr),
+        decrypt_list(T, Key, Tdec).
 
 print_list([]).
 print_list([H|T]) :- writeln(H), print_list(T).
@@ -305,7 +315,9 @@ start_tartarus(Ip,Port,Token):-
 		assert(hoptime_stat(0,0,0,0)),
 		retractall(transfer_queue(_)),
 		assert(transfer_queue([])),ttyflush,
-		set_token(Token),espeak_present,!.		
+		set_token(Token),
+                generate_platform_keys,
+                espeak_present,!.		
 		
 		
 
@@ -556,11 +568,8 @@ chat_to_server_Tartarus_IITG(In,Out,Message,Ack) :-                    %% send m
                 -> true
         ;
                 format(Out,'~q.~n',[Term]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
-                format('Term:~q.~n',[Term]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
-                format('Out:~q.~n',[Out]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
                 flush_output(Out),
                 read(In,Reply),                                         %% wait to get the reply from other side i.e command_acknowledge_Tartarus_IITG(_) as message
-                format('Reply:~q.~n',[Reply]),                             %% if message is not null then write to +Out stream the +term and append new line character in the end
                 (call(Reply)                                            %% call command_acknowledge_Tartarus_IITG(_) predicate
                         ->Ack = true;                                   %% if ack if valid the Ack is true else fail is returned
                         Ack = fail
@@ -1264,7 +1273,7 @@ agent_move(GUID,(Ip_other_end,Port_other_end)):-
         get_ip(Ip),
         platform_port(Port),
 		
-		retractall(get_destination_Ip(_)), assert(get_destination_Ip(Ip_other_end)),
+	retractall(get_destination_Ip(_)), assert(get_destination_Ip(Ip_other_end)),
         retractall(get_destination_port(_)), assert(get_destination_port(Port_other_end)),
         
         ((Ip = Ip_other_end,Port = Port_other_end)->writeln('Agent is already on same platform.'),abort;true),
@@ -1293,7 +1302,7 @@ agent_move(GUID,(Ip_other_end,Port_other_end)):-
 generate_platform_keys():-
         retractall(platform_public_key(_)),
         retractall(platform_private_key(_)),
-        crypto_n_random_bytes(25, Keybytes),
+        crypto_n_random_bytes(10, Keybytes),
         bytes_integer(Keybytes, Privkey),
         crypto_name_curve(prime256v1, Curve),
         crypto_curve_generator(Curve, Generator),
@@ -1301,12 +1310,12 @@ generate_platform_keys():-
         asserta(platform_public_key(Pubkey)),
         asserta(platform_private_key(Privkey)).
 
-generate_session_keys(PubSessionkey, PrivSesskey):-
-        crypto_n_random_bytes(25, Keybytes),
+generate_session_keys(PubSesskey, PrivSesskey):-
+        crypto_n_random_bytes(10, Keybytes),
         bytes_integer(Keybytes, PrivSesskey),
         crypto_name_curve(prime256v1, Curve),
         crypto_curve_generator(Curve, Generator),
-        crypto_curve_scalar_mult(Curve, PrivSesskey, Generator, PubSessionkey).
+        crypto_curve_scalar_mult(Curve, PrivSesskey, Generator, PubSesskey).
 
 generate_secret_key(Pubkey, Privkey, Secretkey):-
         crypto_name_curve(prime256v1, Curve),
@@ -1325,7 +1334,6 @@ get_public_key(Ip_other_end,Port_other_end):-
         ((Ip_other_end=localhost,Port = Port_other_end)->writeln('Same platform.'),abort;true),
         
         agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),req_public_key]).
-
 
 
 agent_move_secure(GUID,(Ip_other_end,Port_other_end)):-
@@ -1352,29 +1360,13 @@ agent_move_secure(GUID,(Ip_other_end,Port_other_end)):-
         writeln("Get the public key of the platform")),
         generate_session_keys(PubSesskey,PrivSesskey),
         generate_secret_key(Pubkey,PrivSesskey,Secretkey),
-        writeln(Secretkey),
 
-        term_string(AgentCode, StrAgentCode),
-        term_string(PayloadList, StrPayloadList),
-        term_string(ListOfTokens2, StrListOfTokens2),
-        term_string(GUID, StrGUID),
-        term_string(Handler, StrHandler),
+        encrypt_list([GUID,Handler,PayloadList,AgentCode,ListOfTokens2],
+                Secretkey,
+                [EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2]),
 
-        encrypt(StrGUID, Secretkey, EncGUID, Tag1),
-        encrypt(StrHandler, Secretkey, EncHandler, Tag2),
-        encrypt(StrAgentCode, Secretkey, EncAgentCode, Tag3),
-        encrypt(StrPayloadList, Secretkey, EncPayloadList, Tag4),
-        encrypt(StrListOfTokens2, Secretkey, EncListOfTokens2, Tag5),
-        
-        decrypt(EncGUID, Secretkey, DecGUID, Tag1),
-        writeln(DecGUID),
-        decrypt(EncAgentCode, Secretkey, DecAgentCode, Tag3),
-        writeln(DecAgentCode),
-        decrypt(EncPayloadList, Secretkey, DecPayloadList, Tag4),
-        writeln(DecPayloadList),
-        
         assertz(outgoing_agent(GUID,TT,_)),
-        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send_secure(EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2,Secretkey,Tag1,Tag2,Tag3,Tag4,Tag5,TT)])->
+        (agent_post(platform,(Ip_other_end,Port_other_end),[handler,platform,(Ip1,Port),send_secure(EncGUID,EncHandler,EncPayloadList,EncAgentCode,EncListOfTokens2,PubSesskey,TT)])->
                 (thread_peek_message(clean_agent_queue,agent_guid(GUID))->thread_get_message(clean_agent_queue,agent_guid(GUID));true),
                 thread_send_message(clean_agent_queue,agent_guid(GUID)),
                 thread_send_message(clean_platform,agent_guid(GUID))
@@ -1385,7 +1377,7 @@ agent_move_secure(GUID,(Ip_other_end,Port_other_end)):-
         %agent_post(platform,(Ip,Port),[handler,platform,(Ip,Port),clean_agent(GUID)]).
         
 
-agent_move(GUID,(_Ip,_Port)):- print_message(error,'Move agent Failed for ':GUID),nl.
+agent_move_secure(GUID,(_Ip,_Port)):- print_message(error,'Move agent Failed for ':GUID),nl.
                                %print_message(error,'Please enter a valid destination token for the moving agent.'),nl.
 
 
@@ -1767,7 +1759,7 @@ handler(platform,(Ip,Port),send_ackm(GUID,_X)):-
         %(member(L,L1)->delete_list(L3,L1,NewList),add_tail(NewList,L8,New),retractall(out_hop_times_details(_)),assert(out_hop_times_details(New));add_tail(L1,L8,New),retractall(out_hop_times_details(_)),assert(out_hop_times_details(New))),
         add_tail(L1,L8,New),retractall(out_hop_times_details(_)),assert(out_hop_times_details(New)),
         length(New,Len), retractall(length1(_)),assert(length1(Len)), retractall(out_hop_time(_,(_,_),(_,_),(_,_),_)),hoptime_info,                                                              
-         
+        
         L88 = (GUID,Time_taken), 
         %L82 = (GUID,_), L83 = [(GUID,_)], 
         out_hop_times_info(L81),      
@@ -1911,7 +1903,7 @@ handler(platform,(_Ip,_Port),send_nackm(_GUID,_Handler,_PayloadList,_ListOfToken
 % matching token, the execution proceeds, else the entire thing is discarded and a negative ackm is sent to the sending platform. In case the platform
 % does not have a security token set, then no checking is done. A postive ackm is send and the agent  is started using agent_create/3.
 
-handler(platform,(Ip_sender,Port_sender),send(GUID,Handler,PayloadList,EncryptedCodeList,ListOfTokens,_BackTime)):-                            %//
+handler(platform,(Ip_sender,Port_sender),send(GUID,Handler,PayloadList,CodeList,ListOfTokens,_BackTime)):-                            %//
         ttyflush,
         %write('Receiving an Agent Posted by link'),writeln(Ip_sender),writeln(Port_sender),writeln(BackTime),nl,
         (platform_token(_)->
@@ -1939,9 +1931,9 @@ handler(platform,(Ip_sender,Port_sender),send(GUID,Handler,PayloadList,Encrypted
                 %handler(platform,(Platform_Ip,Platform_Port),clean_agent(GUID))
                 ;true
         ),
-        % assert(agent_payload(GUID,PayloadList)),
+        assert(agent_payload(GUID,PayloadList)),
         assert(agent_token(GUID,ListOfTokens)),
-        assert_code_Tartarus_IITG(CompList),
+        assert_code_Tartarus_IITG(CodeList),
         assert(agent_GUID(GUID,Handler,(Platform_Ip,Platform_Port))),
         get_time(Time),
         agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_ackm(GUID,Time)]),
@@ -1957,29 +1949,15 @@ handler(platform,(_Ip_sender,_Port_sender), send(_GUID,_Handler,_PayloadList,[_C
 
 %---My handlers
 
-handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens,Secretkey,Tag1,Tag2,Tag3,Tag4,Tag5,_BackTime)):-                            %//
+handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens,PubSesskey,_BackTime)):-                            %//
         ttyflush,
         %write('Receiving an Agent Posted by link'),writeln(Ip_sender),writeln(Port_sender),writeln(BackTime),nl,
-        % writeln(PubSesskey),
-        % platform_private_key(Privkey),
-        % generate_secret_key(PubSesskey,Privkey,Secretkey),
-        writeln(Secretkey),
-        decrypt(EncGUID, Secretkey, StrGUID, Tag1),
-        decrypt(EncHandler, Secretkey, StrHandler, Tag2),
-        decrypt(EncCodeList, Secretkey, StrCodeList, Tag3),
-        decrypt(EncPayloadList, Secretkey, StrPayloadList, Tag4),
-        decrypt(EncListOfTokens, Secretkey, StrListOfTokens, Tag5),
+        platform_private_key(Privkey),
+        generate_secret_key(PubSesskey,Privkey,Secretkey),
         
-        term_string(CodeList, StrCodeList),
-        writeln(AgentCode),
-        term_string(PayloadList, StrPayloadList),
-        writeln(PayloadList),
-        term_string(ListOfTokens, StrListOfTokens),
-        writeln(ListOfTokens),
-        term_string(GUID, StrGUID),
-        writeln(GUID),
-        term_string(Handler, StrHandler),
-        writeln(Handler),
+        decrypt_list([EncGUID,EncHandler,EncPayloadList,EncCodeList,EncListOfTokens],
+                Secretkey,
+                [GUID,Handler,PayloadList,CodeList,ListOfTokens]),
 
         (platform_token(_)->
                 nothing;
@@ -2006,7 +1984,7 @@ handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPaylo
                 %handler(platform,(Platform_Ip,Platform_Port),clean_agent(GUID))
                 ;true
         ),
-        % assert(agent_payload(GUID,PayloadList)),
+        assert(agent_payload(GUID,PayloadList)),
         assert(agent_token(GUID,ListOfTokens)),
         assert_code_Tartarus_IITG(CodeList),
         assert(agent_GUID(GUID,Handler,(Platform_Ip,Platform_Port))),
@@ -2018,50 +1996,26 @@ handler(platform,(Ip_sender,Port_sender),send_secure(EncGUID,EncHandler,EncPaylo
         %nl,
         true,!.
 
-handler(platform,(_Ip_sender,_Port_sender), send_secure(_GUID,_Handler,_PayloadList,[_Code|_CodeList],_ListOfTokens,_PubSesskey,_Bcktime)):-
+handler(platform,(_Ip_sender,_Port_sender), send_secure(_GUID,_Handler,_PayloadList,_CodeList,_ListOfTokens,_PubSesskey,_Bcktime)):-
         print_message(error,'Error in handler. The posted agent not received properly over the Link').
 
 
 
 handler(platform,(Ip_sender,Port_sender),req_public_key):-
         ttyflush,
-        writeln("send public key"),
         (platform_public_key(Pubkey)->
                 nothing;
                 agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Ip_sender,Port_sender),send_nackm(GUID)]),fail
         ),
         get_platform_details(Platform_Ip,Platform_Port),
         agent_post(platform,(Ip_sender,Port_sender),[handler,platform,(Platform_Ip,Platform_Port),res_public_key(Pubkey)]),
-        writeln("pubkey sent").
+        true,!.
 
 handler(platform,(Ip_sender,Port_sender),res_public_key(Pubkey)):-
         ttyflush,
-        writeln(Pubkey),
         retractall(public_key_list(Ip_sender,Port_sender,_)),
         asserta(public_key_list(Ip_sender,Port_sender,Pubkey)),
-        writeln("pubkey stored").
-
-get_encrypt_key(Ip_receiver,Port_receiver,Key):-
-        ttyflush,
-        writeln("get key"),
-        mutex_lock(send_message_mutex),
-        catch(
-                (tcp_socket(Socket),
-                tcp_connect(Socket, Ip_receiver:Port_receiver),
-                tcp_open_socket(Socket, In, Out),
-                format(Out,'~s.~n',"[handler,platform,(localhost,6001),get_key]"),
-                writeln(Socket),writeln(Out),
-                flush_output(Out),
-                read(In,Key),
-                tcp_close_socket(Socket)
-                % close(In), close(Out)
-                ),
-                Error,
-                (print_message(error, Error),
-                fail)
-        ),
-        mutex_unlock(send_message_mutex).
-
+        true,!.
 
 %---End of my handlers
 
